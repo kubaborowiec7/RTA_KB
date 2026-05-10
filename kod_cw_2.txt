@@ -1,0 +1,168 @@
+from pyspark.sql import SparkSession
+
+spark = (
+    SparkSession.builder
+    .appName("Lab2-Transactions")
+    .getOrCreate()
+)
+spark.sparkContext.setLogLevel("WARN")
+print(f"Spark {spark.version} — gotowy")
+
+df = spark.read.json("transactions_10k.jsonl")
+
+print(f"Liczba rekordów: {df.count()}")
+df.printSchema()
+
+df.show(10, truncate=False)
+
+from pyspark.sql.functions import to_timestamp, col
+
+df = df.withColumn("timestamp", to_timestamp(col("timestamp"), "yyyy-MM-dd HH:mm:ss"))
+
+df.printSchema()  # timestamp powinien być teraz 'timestamp (nullable = true)'
+
+from pyspark.sql.functions import count, sum as _sum, avg, round as _round
+
+store_summary = (
+    df.groupBy("store")
+    .agg(
+        count("tx_id").alias("liczba_tx"),
+        _round(_sum("amount"), 2).alias("suma_PLN"),
+        _round(avg("amount"), 2).alias("srednia_PLN"),
+    )
+    .orderBy("store")
+)
+store_summary.show()
+
+from pyspark.sql.functions import sum as _sum, min as _min, max as _max
+
+# Zadanie 2.2 - Statystyki per kategoria
+df.groupBy("category").agg(
+    _sum("amount").alias("suma_kwot"),
+    _min("amount").alias("minimalna_kwota"),
+    _max("amount").alias("maksymalna_kwota")
+).orderBy("category").show()
+
+from pyspark.sql.functions import window
+
+hourly = (
+    df.groupBy(window("timestamp", "1 hour"))    # okno 1-godzinne
+    .agg(
+        count("tx_id").alias("liczba_tx"),
+        _round(_sum("amount"), 2).alias("suma_PLN"),
+    )
+    .orderBy("window")
+)
+hourly.show(truncate=False)
+
+(
+    hourly
+    .select(
+        col("window.start").alias("od"),
+        col("window.end").alias("do"),
+        "liczba_tx",
+        "suma_PLN",
+    )
+    .show(truncate=False)
+)
+
+from pyspark.sql.functions import window, count, sum
+
+df.groupBy(
+    window("timestamp", "30 minutes"), 
+    "store"
+).agg(
+    count("*").alias("liczba_transakcji"),
+    sum("amount").alias("suma_kwot")
+).orderBy(
+    "window", 
+    "store"
+).show(truncate=False)
+
+from pyspark.sql.functions import desc, col
+
+df.filter(col("store") == "Kraków") \
+    .groupBy(window("timestamp", "1 hour")) \
+    .agg(sum("amount").alias("suma_przychodow")) \
+    .orderBy(desc("suma_przychodow")) \
+    .show(truncate=False)
+
+sliding = (
+    df.groupBy(window("timestamp", "1 hour", "30 minutes"))  # szerokość 1h, krok 30min
+    .agg(
+        count("tx_id").alias("liczba_tx"),
+        _round(_sum("amount"), 2).alias("suma_PLN"),
+    )
+    .select(
+        col("window.start").alias("od"),
+        col("window.end").alias("do"),
+        "liczba_tx",
+        "suma_PLN",
+    )
+    .orderBy("od")
+)
+sliding.show(truncate=False)
+
+tumbling_rows = (
+    df.groupBy(window("timestamp", "1 hour"))
+    .agg(count("tx_id"))
+    .count()
+)
+sliding_rows = (
+    df.groupBy(window("timestamp", "1 hour", "30 minutes"))
+    .agg(count("tx_id"))
+    .count()
+)
+print(f"Tumbling (1h):          {tumbling_rows} okien")
+print(f"Sliding  (1h / 30min):  {sliding_rows} okien")
+
+# Odpowiedz w komentarzu: dlaczego sliding ma więcej wierszy?
+# TWOJA ODPOWIEDŹ: Sliding window generuje więcej wierszy, ponieważ okna nakładają się na siebie (overlap). 
+# W przypadku okna typu Tumbling (1h), nowe okno tworzone jest dokładnie co godzinę i są one rozłączne.
+# W oknie Sliding, nowe okno jest tworzone co 30 minut. 
+# Oznacza to, że każde zdarzenie wpada do dwóch różnych okien jednocześnie, a zagęszczenie startu okien jest dwukrotnie większe, co skutkuje większą liczbą rekordów wynikowych.
+
+# Odpowiedz na pytania w komentarzach:
+
+# 1. Ile transakcji jest w oknie 09:00–10:00?
+#    Sprawdź w wyniku zadania 3.1.
+#    ODPOWIEDŹ: 4661 
+
+# 2. Jaka jest różnica między groupBy("store") a groupBy(window(...), "store")?
+#    ODPOWIEDŹ: groupBy("store") wykonuje agregację globalną. Spark sumuje lub liczy wszystkie dane dla danego sklepu od początku uruchomienia strumienia. Wynikiem jest jeden wiersz na każdy sklep.
+#    groupBy(window(...), "store") wykonuje agregację czasową (okienkową). Dane są dzielone na konkretne przedziały czasu. Wynikiem jest wiele wierszy dla każdego sklepu — osobny wiersz dla każdego przedziału czasowego, w którym wystąpiła transakcja. Pozwala to śledzić zmiany sprzedaży w czasie, a nie tylko sumaryczny wynik.
+# 3. W oknie sliding 1h/30min — ile okien zawiera transakcje z godziny 09:30?
+#    Wskazówka: narysuj oś czasu.
+#    ODPOWIEDŹ: 2
+
+#zad dom 1
+
+from pyspark.sql.functions import col, window, avg, asc
+
+df.filter(col("store") == "Gdańsk") \
+    .groupBy(window("timestamp", "1 hour")) \
+    .agg(avg("amount").alias("srednia_kwota")) \
+    .orderBy(asc("srednia_kwota")) \
+    .show(1, truncate=False) 
+
+# zad dom 2
+
+from pyspark.sql.functions import count
+
+df.groupBy(window("timestamp", "30 minutes"), "category") \
+    .agg(count("tx_id").alias("liczba_transakcji")) \
+    .filter(col("window.start").cast("string").contains("09:00:00")) \
+    .orderBy("category") \
+    .show(truncate=False)
+
+# zad dom 3
+
+from pyspark.sql.functions import desc
+
+df.groupBy(window("timestamp", "15 minutes")) \
+    .agg(count("*").alias("suma_transakcji")) \
+    .orderBy(desc("suma_transakcji")) \
+    .show(1, truncate=False)
+
+spark.stop()
+
